@@ -2888,7 +2888,12 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
             // connection accepts the registration but never delivers.
             const connection = proxyState.manager.getConnection(params.server);
             const modernEra = connection?.client?.getProtocolEra?.() === "modern";
-            const result = subscribeResource(pi, proxyState.manager, params.server, params.uri);
+            const result = subscribeResource(
+              proxyState.sendMessage ?? ((message, options) => pi.sendMessage(message as never, options)),
+              proxyState.manager,
+              params.server,
+              params.uri,
+            );
             const warnings = [
               ...(connected ? [] : ["the server is not connected; updates flow once it connects"]),
               ...(connected && !modernEra ? ["the connection is not in the modern protocol era; set protocolVersion \"auto\" or \"2026-07-28\" in the server entry to receive pushes"] : []),

@@ -153,6 +153,26 @@ describe("lazy-keep-alive lifecycle", () => {
     expect(fake.connectCalls).toContain("srv");
   });
 
+  it("a lazy-keep-alive server recovered by a health check gains the config-owned hold", async () => {
+    // A subscription marked this never-connected server keep-alive (its
+    // lazyConnect failed, so markKeepAliveAfterConnect never ran).
+    const def = makeDefinition("lazy-keep-alive");
+    lifecycle.registerServer("srv", def, { idleTimeout: 0 });
+    lifecycle.markKeepAlive("srv", def, "resource-subscription");
+    fake.setConnection("srv", null);
+
+    // The health check reconnects it.
+    await (lifecycle as never as { checkConnections: () => Promise<void> }).checkConnections();
+    expect(fake.connectCalls).toContain("srv");
+    fake.setConnection("srv", "connected");
+    await (lifecycle as never as { checkConnections: () => Promise<void> }).checkConnections();
+
+    // The successful reconnect established the configuration-owned hold, so
+    // releasing the subscription's hold must not drop keep-alive.
+    lifecycle.releaseKeepAlive("srv", "resource-subscription");
+    expect(lifecycle.isKeepAlive("srv")).toBe(true);
+  });
+
   it("actively refreshes connected keep-alive servers instead of trusting local status", async () => {
     const def = makeDefinition("keep-alive");
     def.url = "https://example.test/mcp";

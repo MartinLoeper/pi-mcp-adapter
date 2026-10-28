@@ -193,6 +193,18 @@ export class McpLifecycleManager {
     );
   }
 
+  /**
+   * A lazy-keep-alive server that connected through a health-check retry has
+   * now been used successfully, so its configuration owns a hold from this
+   * point — a later subscription release cannot drop it. Mirrors the
+   * markKeepAliveAfterConnect call on the lazyConnect paths.
+   */
+  private markConfigHoldAfterConnect(name: string, definition: ServerDefinition): void {
+    if ((definition.lifecycle ?? "lazy") === "lazy-keep-alive") {
+      this.markKeepAlive(name, definition);
+    }
+  }
+
   private async checkKeepAliveConnection(
     name: string,
     definition: ServerDefinition,
@@ -239,6 +251,7 @@ export class McpLifecycleManager {
         return;
       }
       logger.debug(`Reconnected to ${name}`);
+      this.markConfigHoldAfterConnect(name, definition);
       await this.publishConnectedMetadata(name, definition, freshConnection);
       return;
     }
@@ -291,6 +304,7 @@ export class McpLifecycleManager {
         return;
       }
       logger.debug(`Reconnected stale MCP session for ${name}`);
+      this.markConfigHoldAfterConnect(name, definition);
       await this.publishConnectedMetadata(name, definition, freshConnection);
       return;
     }

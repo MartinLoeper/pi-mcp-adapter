@@ -1,7 +1,7 @@
 // resource-wake.ts - runtime resource subscriptions that wake the agent
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { McpServerManager } from "./server-manager.ts";
+import type { SendMessageFn } from "./state.ts";
 
 type ResourceUpdatedListener = (serverName: string, uri: string) => void;
 
@@ -9,6 +9,9 @@ const DYNAMIC_TOKEN_PREFIX = "resource-wake:dynamic";
 
 /** Owner tag for the keep-alive holds a resource subscription adds. */
 export const SUBSCRIPTION_KEEP_ALIVE_OWNER = "resource-subscription";
+
+/** The custom message a resource update reaches the model as. */
+export const MCP_RESOURCE_UPDATED_TYPE = "mcp-resource-updated";
 
 /**
  * Mirrors MAX_RESOURCE_SUBSCRIPTIONS in server-manager.ts (the listen-filter
@@ -24,18 +27,21 @@ export function dynamicWakeToken(serverName: string, uri: string): string {
   return `${DYNAMIC_TOKEN_PREFIX}:${JSON.stringify([serverName, uri])}`;
 }
 
-function makeWakeListener(pi: ExtensionAPI): ResourceUpdatedListener {
-  const sendMessage = typeof pi.sendMessage === "function"
-    ? pi.sendMessage.bind(pi)
-    : undefined;
+/**
+ * Build the wake delivery on the session's sendMessage seam, the same path
+ * background task results use (task-jobs.ts): it drops messages for stale
+ * runtime owners and converges keep-alives before triggering a turn, so a
+ * woken agent sees settled state.
+ */
+function makeWakeListener(sendMessage: SendMessageFn): ResourceUpdatedListener {
   return (updatedServer, updatedUri) => {
-    if (!sendMessage) return;
     try {
       sendMessage(
         {
-          customType: "mcp-resource-updated",
-          content: `MCP resource updated: ${updatedUri} (server ${updatedServer}).`,
+          customType: MCP_RESOURCE_UPDATED_TYPE,
           display: true,
+          content: [{ type: "text", text: `MCP resource updated: ${updatedUri} (server ${updatedServer}).` }],
+          details: { subscription: { server: updatedServer, uri: updatedUri } },
         },
         { triggerTurn: true, deliverAs: "followUp" },
       );
@@ -92,7 +98,7 @@ function flatten(servers: Map<string, Set<string>> | undefined): string[] {
  * (reload), and nothing subscribes unless the agent asks.
  */
 export function subscribeResource(
-  pi: ExtensionAPI,
+  sendMessage: SendMessageFn,
   manager: McpServerManager,
   serverName: string,
   uri: string,
@@ -113,7 +119,7 @@ export function subscribeResource(
     dynamicWakeToken(serverName, uri),
     serverName,
     uri,
-    makeWakeListener(pi),
+    makeWakeListener(sendMessage),
   );
   return { ok: true, message: `Subscribed to ${uri} on ${serverName}. Updates arrive as agent turns.`, subscriptions: flatten(dynamicSubscriptions.get(manager)) };
 }
