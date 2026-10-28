@@ -2871,6 +2871,10 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
             // listener registration itself works connected or not.
             const core = await loadForRuntime(loadCoreRuntime, proxyGuard);
             const connected = await core.lazyConnect(proxyState, params.server, signal).catch(() => false);
+            // Keep the connection alive: idle shutdown would otherwise silently
+            // stop pushes after the idle timeout.
+            const definition = proxyState.config.mcpServers[params.server];
+            if (definition) proxyState.lifecycle.markKeepAlive(params.server, definition);
             const result = subscribeResource(pi, proxyState.manager, params.server, params.uri);
             return {
               content: [{ type: "text" as const, text: `${result.message}${connected ? "" : "\nWarning: the server is not connected; updates flow once it connects."}\nDynamic subscriptions: ${result.subscriptions.length > 0 ? result.subscriptions.join(", ") : "(none)"}` }],
