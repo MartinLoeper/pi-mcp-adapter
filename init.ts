@@ -29,7 +29,7 @@ import {
 import { McpServerManager, isTransientHttpConnectError, type ServerConnection } from "./server-manager.ts";
 import { buildToolMetadata, ownTools, totalToolCount, unavailableAppNotes } from "./tool-metadata.ts";
 import { resourceNameToToolName } from "./resource-tools.ts";
-import { registerResourceWakeListeners } from "./resource-wake.ts";
+import { normalizeSubscribeLifecycle, registerResourceWakeListeners } from "./resource-wake.ts";
 import { UiResourceHandler } from "./ui-resource-handler.ts";
 import { formatMcpFooterStatus, formatMcpStatus, openUrl, parallelLimit, providerSignInMessage, sanitizeTerminalText } from "./utils.ts";
 import { logger } from "./logger.ts";
@@ -168,6 +168,9 @@ export async function initializeMcp(
       : await applyProjectServerTrustToConfig(loadedConfig, ctx, { allowUnapproved: projectServersFlag === "allow" });
   options.onProjectTrustResolved?.();
   const config = trustResult.config;
+  // subscribe needs a persistent connection: default those servers to
+  // keep-alive before any lifecycle decision reads the entry.
+  config.mcpServers = normalizeSubscribeLifecycle(config.mcpServers);
   const authStorageOptions = getAuthStorageOptions(config.settings?.oauthDir, cwd, config.settings?.oauthCredentialStore);
 
   const ownsOAuthRuntime = options.oauthRuntime === undefined;

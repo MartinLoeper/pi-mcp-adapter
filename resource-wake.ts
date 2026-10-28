@@ -11,6 +11,26 @@ export function resourceWakeToken(serverName: string, uri: string): string {
 }
 
 /**
+ * Give every `subscribe` server the persistent connection its push
+ * subscription requires. A lazy server connects on first tool use, so its
+ * subscriptions would silently never flow; keep-alive connects at startup
+ * and survives idle shutdowns. Explicit lifecycle settings are respected.
+ */
+export function normalizeSubscribeLifecycle(
+  servers: Record<string, ServerEntry>,
+): Record<string, ServerEntry> {
+  let changed = false;
+  const next: Record<string, ServerEntry> = { ...servers };
+  for (const [name, entry] of Object.entries(servers)) {
+    if (!entry.subscribe || entry.subscribe.length === 0) continue;
+    if (entry.lifecycle !== undefined) continue;
+    next[name] = { ...entry, lifecycle: "keep-alive" };
+    changed = true;
+  }
+  return changed ? next : servers;
+}
+
+/**
  * Register push listeners for every `subscribe` URI in the config.
  *
  * The server manager folds registered URIs into its subscriptions/listen
@@ -37,6 +57,11 @@ export function registerResourceWakeListeners(
     if (entry.protocolVersion === undefined || entry.protocolVersion === "legacy") {
       console.warn(
         `MCP server "${serverName}" sets subscribe but cannot receive push updates: protocolVersion must be "auto" or "2026-07-28" (subscriptions/listen needs the modern era). Set protocolVersion in the server entry.`,
+      );
+    }
+    if (entry.lifecycle === "lazy") {
+      console.warn(
+        `MCP server "${serverName}" sets subscribe with lifecycle "lazy": a lazy server connects on first tool use, so pushes cannot flow until then. Remove lifecycle or set "keep-alive".`,
       );
     }
     for (const uri of entry.subscribe) {

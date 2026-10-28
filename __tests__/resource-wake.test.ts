@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { registerResourceWakeListeners, resourceWakeToken } from "../resource-wake.ts";
+import { normalizeSubscribeLifecycle, registerResourceWakeListeners, resourceWakeToken } from "../resource-wake.ts";
 import type { ServerEntry } from "../types.ts";
 
 type Listener = (serverName: string, uri: string) => void;
@@ -24,6 +24,32 @@ function makePi(withSendMessage = true) {
       : undefined,
   } as unknown as Parameters<typeof registerResourceWakeListeners>[0];
 }
+
+describe("normalizeSubscribeLifecycle", () => {
+  it("defaults subscribe servers to keep-alive and leaves others untouched", () => {
+    const servers: Record<string, ServerEntry> = {
+      "sub": { url: "http://x", subscribe: ["magellan://pipelineruns"] },
+      "plain": { url: "http://y" },
+    };
+    const next = normalizeSubscribeLifecycle(servers);
+    expect(next["sub"].lifecycle).toBe("keep-alive");
+    expect(next["plain"].lifecycle).toBeUndefined();
+    // Original entries are not mutated (programmatic configs stay shared-safe).
+    expect(servers["sub"].lifecycle).toBeUndefined();
+  });
+
+  it("respects explicit lifecycle settings", () => {
+    const servers: Record<string, ServerEntry> = {
+      "eager": { url: "http://x", lifecycle: "eager", subscribe: ["a://b"] },
+      "lazy": { url: "http://y", lifecycle: "lazy", subscribe: ["a://b"] },
+    };
+    const next = normalizeSubscribeLifecycle(servers);
+    expect(next["eager"].lifecycle).toBe("eager");
+    expect(next["lazy"].lifecycle).toBe("lazy");
+    // No entry replaced -> same record reference returned.
+    expect(next).toBe(servers);
+  });
+});
 
 describe("registerResourceWakeListeners", () => {
   it("registers a listener for every subscribe URI of every configured server", () => {
@@ -85,6 +111,21 @@ describe("registerResourceWakeListeners", () => {
       // The listener is still registered — if the connection does negotiate
       // the modern era by other means, pushes flow; the warning is advisory.
       expect(manager.registrations.size).toBe(2);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("warns when subscribe is combined with an explicit lazy lifecycle", () => {
+    const manager = makeManager();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      registerResourceWakeListeners(makePi(), manager as never, {
+        "lazy-sub": { url: "http://x", protocolVersion: "auto", lifecycle: "lazy", subscribe: ["magellan://pipelineruns"] },
+      });
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0][0]).toContain('"lazy-sub"');
+      expect(warnSpy.mock.calls[0][0]).toContain("lazy");
     } finally {
       warnSpy.mockRestore();
     }
