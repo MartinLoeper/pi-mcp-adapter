@@ -7,7 +7,7 @@ import type { McpExtensionState } from "./state.ts";
 import { isServerDisabled, type CachedTool, type DirectToolSpec, type McpAdapterOptions, type McpConfig, type PromptMetadata, type ServerEntry } from "./types.ts";
 import type { McpOAuthRuntime } from "./mcp-auth-flow.ts";
 import type { NestedCallHandOff } from "./proxy-modes.ts";
-import { hasServerSubscriptions, subscriptionMayReleaseKeepAliveHold, subscriptionNeedsKeepAliveHold, subscribeResource, unsubscribeResource } from "./resource-wake.ts";
+import { hasServerSubscriptions, SUBSCRIPTION_KEEP_ALIVE_OWNER, subscribeResource, unsubscribeResource } from "./resource-wake.ts";
 import type { ExtractField } from "./extraction.ts";
 import { Type } from "typebox";
 import type { TSchema } from "typebox";
@@ -2879,11 +2879,11 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
             assertRuntimeGuard(proxyGuard);
             signal?.throwIfAborted();
             // Keep the connection alive while subscriptions exist: idle
-            // shutdown would otherwise silently stop pushes. Only "keep-alive"
-            // configuration already holds the server unconditionally — eager
-            // and lazy-keep-alive need the subscription's hold too.
+            // shutdown would otherwise silently stop pushes. The hold is
+            // owner-tagged, so releasing it on unsubscribe never touches
+            // holds from configuration or from a successful connect.
             const definition = proxyState.config.mcpServers[params.server];
-            if (definition && subscriptionNeedsKeepAliveHold(definition.lifecycle)) proxyState.lifecycle.markKeepAlive(params.server, definition);
+            if (definition) proxyState.lifecycle.markKeepAlive(params.server, definition, SUBSCRIPTION_KEEP_ALIVE_OWNER);
             // subscriptions/listen needs the modern protocol era; a legacy-era
             // connection accepts the registration but never delivers.
             const connection = proxyState.manager.getConnection(params.server);
@@ -2899,12 +2899,13 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
             };
           }
           const unsubscribed = unsubscribeResource(proxyState.manager, params.server, params.uri);
-          // Release the subscription's keep-alive hold when the last URI for
-          // the server is gone — but only for modes whose holds exist solely
-          // for the subscription; configuration-requested holds stay.
+          // Release the subscription's own keep-alive hold when the last URI
+          // for the server is gone. Owner-tagged, so holds from configuration
+          // ("keep-alive" from init) or from a successful connect
+          // ("lazy-keep-alive") survive; a never-connected server stops its
+          // background reconnect retries.
           if (unsubscribed.ok && !hasServerSubscriptions(proxyState.manager, params.server)) {
-            const definition = proxyState.config.mcpServers[params.server];
-            if (definition && subscriptionMayReleaseKeepAliveHold(definition.lifecycle)) proxyState.lifecycle.releaseKeepAlive(params.server);
+            proxyState.lifecycle.releaseKeepAlive(params.server, SUBSCRIPTION_KEEP_ALIVE_OWNER);
           }
           const result = unsubscribed;
           return {

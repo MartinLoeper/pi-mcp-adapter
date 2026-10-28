@@ -1,38 +1,57 @@
 import { describe, expect, it, vi } from "vitest";
-import { dynamicWakeToken, hasServerSubscriptions, MAX_SUBSCRIPTIONS_PER_SERVER, subscriptionMayReleaseKeepAliveHold, subscriptionNeedsKeepAliveHold, subscribeResource, unsubscribeResource } from "../resource-wake.ts";
+import { dynamicWakeToken, hasServerSubscriptions, MAX_SUBSCRIPTIONS_PER_SERVER, subscribeResource, unsubscribeResource } from "../resource-wake.ts";
 import { MAX_RESOURCE_SUBSCRIPTIONS } from "../server-manager.ts";
-import type { ServerEntry } from "../types.ts";
+import { McpLifecycleManager } from "../lifecycle.ts";
+import type { McpServerManager } from "../server-manager.ts";
+import type { ServerDefinition } from "../types.ts";
 
-describe("keep-alive hold rules", () => {
-  it("needs a hold for every mode except keep-alive", () => {
-    // Only "keep-alive" holds unconditionally from configuration. Eager
-    // never enters the keep-alive set; lazy-keep-alive only after a connect.
-    expect(subscriptionNeedsKeepAliveHold("keep-alive")).toBe(false);
-    expect(subscriptionNeedsKeepAliveHold("eager")).toBe(true);
-    expect(subscriptionNeedsKeepAliveHold("lazy-keep-alive")).toBe(true);
-    expect(subscriptionNeedsKeepAliveHold("lazy")).toBe(true);
-    expect(subscriptionNeedsKeepAliveHold(undefined)).toBe(true);
+function makeLifecycleManager() {
+  // The lifecycle manager only needs the manager for connect/close paths we
+  // do not exercise here; keep-alive bookkeeping is self-contained.
+  return new McpLifecycleManager({} as unknown as McpServerManager);
+}
+
+const definition = { url: "http://x" } as ServerDefinition;
+
+describe("keep-alive hold ownership", () => {
+  it("a subscription-owned hold is removed when the subscription releases it", () => {
+    const lifecycle = makeLifecycleManager();
+    lifecycle.markKeepAlive("server", definition, "resource-subscription");
+    lifecycle.releaseKeepAlive("server", "resource-subscription");
+    // No other owner: the hold (and its reconnect retries) is gone.
+    expect(lifecycle.isKeepAlive("server")).toBeFalsy();
   });
 
-  it("may release only holds the subscription alone created", () => {
-    // keep-alive holds from init and lazy-keep-alive holds from connects
-    // must survive; lazy/eager holds exist only for the subscription.
-    expect(subscriptionMayReleaseKeepAliveHold("keep-alive")).toBe(false);
-    expect(subscriptionMayReleaseKeepAliveHold("lazy-keep-alive")).toBe(false);
-    expect(subscriptionMayReleaseKeepAliveHold("eager")).toBe(true);
-    expect(subscriptionMayReleaseKeepAliveHold("lazy")).toBe(true);
-    expect(subscriptionMayReleaseKeepAliveHold(undefined)).toBe(true);
+  it("a config-owned hold survives a subscription release on the same server", () => {
+    const lifecycle = makeLifecycleManager();
+    lifecycle.markKeepAlive("server", definition, "config");
+    lifecycle.markKeepAlive("server", definition, "resource-subscription");
+    lifecycle.releaseKeepAlive("server", "resource-subscription");
+    expect(lifecycle.isKeepAlive("server")).toBe(true);
   });
 
-  it("accepts real server entries of each shape", () => {
-    const entries: Record<string, ServerEntry> = {
-      configured: { url: "http://x", lifecycle: "lazy-keep-alive" },
-      lazyDefault: { url: "http://y" },
-    };
-    expect(subscriptionNeedsKeepAliveHold(entries["configured"].lifecycle)).toBe(true);
-    expect(subscriptionMayReleaseKeepAliveHold(entries["configured"].lifecycle)).toBe(false);
-    expect(subscriptionNeedsKeepAliveHold(entries["lazyDefault"].lifecycle)).toBe(true);
-    expect(subscriptionMayReleaseKeepAliveHold(entries["lazyDefault"].lifecycle)).toBe(true);
+  it("a hold established by a later connect survives the subscription release", () => {
+    // lazy-keep-alive servers are marked "config" after a successful connect.
+    const lifecycle = makeLifecycleManager();
+    lifecycle.markKeepAlive("server", definition, "resource-subscription");
+    lifecycle.markKeepAlive("server", definition, "config"); // connect succeeded
+    lifecycle.releaseKeepAlive("server", "resource-subscription");
+    expect(lifecycle.isKeepAlive("server")).toBe(true);
+  });
+
+  it("releasing an owner that never marked is a no-op", () => {
+    const lifecycle = makeLifecycleManager();
+    lifecycle.markKeepAlive("server", definition, "config");
+    expect(() => lifecycle.releaseKeepAlive("server", "resource-subscription")).not.toThrow();
+    expect(lifecycle.isKeepAlive("server")).toBe(true);
+  });
+
+  it("unregistering a server drops all owners", () => {
+    const lifecycle = makeLifecycleManager();
+    lifecycle.markKeepAlive("server", definition, "config");
+    lifecycle.markKeepAlive("server", definition, "resource-subscription");
+    lifecycle.unregisterServer("server");
+    expect(lifecycle.isKeepAlive("server")).toBeFalsy();
   });
 });
 

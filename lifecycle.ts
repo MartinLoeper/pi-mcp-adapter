@@ -30,6 +30,8 @@ interface RetryState {
 
 export class McpLifecycleManager {
   private keepAliveServers = new Map<string, ServerDefinition>();
+  /** Who holds each server's keep-alive: configuration, connects, or runtime callers. */
+  private keepAliveOwners = new Map<string, Set<string>>();
   private allServers = new Map<string, ServerDefinition>();
   private serverSettings = new Map<string, { idleTimeout?: number }>();
   private globalIdleTimeout = 10 * 60 * 1000;
@@ -68,19 +70,37 @@ export class McpLifecycleManager {
     this.onAuthRequired = callback;
   }
 
-  markKeepAlive(name: string, definition: ServerDefinition): void {
+  /** Whether the server currently has any keep-alive hold. */
+  isKeepAlive(name: string): boolean {
+    return this.keepAliveServers.has(name);
+  }
+
+  markKeepAlive(name: string, definition: ServerDefinition, owner: string = "config"): void {
     if (isServerDisabled(definition)) return;
     this.keepAliveServers.set(name, definition);
+    let owners = this.keepAliveOwners.get(name);
+    if (!owners) {
+      owners = new Set();
+      this.keepAliveOwners.set(name, owners);
+    }
+    owners.add(owner);
   }
 
   /**
-   * Drop a keep-alive hold that was added at runtime (e.g. by a resource
-   * subscription), returning the server to idle-shutdown eligibility.
-   * Callers must not release holds their configuration requested: those are
-   * re-established on every initialization.
+   * Drop one owner's keep-alive hold. The server stays keep-alive while any
+   * other owner still holds it (configuration, or a successful
+   * lazy-keep-alive connect); the hold — and with it the health-check
+   * reconnect loop — is removed only when the last owner releases. Releasing
+   * an owner that never marked is a no-op.
    */
-  releaseKeepAlive(name: string): void {
-    this.keepAliveServers.delete(name);
+  releaseKeepAlive(name: string, owner: string = "config"): void {
+    const owners = this.keepAliveOwners.get(name);
+    if (!owners) return;
+    owners.delete(owner);
+    if (owners.size === 0) {
+      this.keepAliveOwners.delete(name);
+      this.keepAliveServers.delete(name);
+    }
   }
 
   registerServer(name: string, definition: ServerDefinition, settings?: { idleTimeout?: number }): void {
@@ -92,6 +112,7 @@ export class McpLifecycleManager {
   unregisterServer(name: string): void {
     this.allServers.delete(name);
     this.keepAliveServers.delete(name);
+    this.keepAliveOwners.delete(name);
     this.serverSettings.delete(name);
     this.retryStates.delete(name);
     this.pendingMetadataPublications.delete(name);
