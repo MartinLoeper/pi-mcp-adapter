@@ -7,7 +7,7 @@ import type { McpExtensionState } from "./state.ts";
 import { isServerDisabled, type CachedTool, type DirectToolSpec, type McpAdapterOptions, type McpConfig, type PromptMetadata, type ServerEntry } from "./types.ts";
 import type { McpOAuthRuntime } from "./mcp-auth-flow.ts";
 import type { NestedCallHandOff } from "./proxy-modes.ts";
-import { subscribeResource, unsubscribeResource } from "./resource-wake.ts";
+import { hasServerSubscriptions, subscribeResource, unsubscribeResource } from "./resource-wake.ts";
 import type { ExtractField } from "./extraction.ts";
 import { Type } from "typebox";
 import type { TSchema } from "typebox";
@@ -2870,11 +2870,22 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
             // Connect first when needed so pushes can start flowing; the
             // listener registration itself works connected or not.
             const core = await loadForRuntime(loadCoreRuntime, proxyGuard);
-            const connected = await core.lazyConnect(proxyState, params.server, signal).catch(() => false);
-            // Keep the connection alive: idle shutdown would otherwise silently
-            // stop pushes after the idle timeout.
+            // Cancellation must escape: a swallowed abort would still register
+            // the subscription below and wake the agent later.
+            const connected = await core.lazyConnect(proxyState, params.server, signal).catch((error: unknown) => {
+              if (signal?.aborted) throw error;
+              return false;
+            });
+            assertRuntimeGuard(proxyGuard);
+            signal?.throwIfAborted();
+            // Keep the connection alive while subscriptions exist: idle shutdown
+            // would otherwise silently stop pushes after the idle timeout.
+            // Configuration-requested persistence needs no extra hold.
             const definition = proxyState.config.mcpServers[params.server];
-            if (definition) proxyState.lifecycle.markKeepAlive(params.server, definition);
+            const persistentByConfig = definition?.lifecycle === "keep-alive"
+              || definition?.lifecycle === "eager"
+              || definition?.lifecycle === "lazy-keep-alive";
+            if (definition && !persistentByConfig) proxyState.lifecycle.markKeepAlive(params.server, definition);
             // subscriptions/listen needs the modern protocol era; a legacy-era
             // connection accepts the registration but never delivers.
             const connection = proxyState.manager.getConnection(params.server);
@@ -2889,7 +2900,17 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
               details: { mode: "subscribe", ok: result.ok, server: params.server, uri: params.uri, connected, modernEra, subscriptions: result.subscriptions },
             };
           }
-          const result = unsubscribeResource(proxyState.manager, params.server, params.uri);
+          const unsubscribed = unsubscribeResource(proxyState.manager, params.server, params.uri);
+          // Release the subscription's keep-alive hold when the last URI for
+          // the server is gone, unless configuration requested persistence.
+          if (unsubscribed.ok && !hasServerSubscriptions(proxyState.manager, params.server)) {
+            const definition = proxyState.config.mcpServers[params.server];
+            const persistentByConfig = definition?.lifecycle === "keep-alive"
+              || definition?.lifecycle === "eager"
+              || definition?.lifecycle === "lazy-keep-alive";
+            if (definition && !persistentByConfig) proxyState.lifecycle.releaseKeepAlive(params.server);
+          }
+          const result = unsubscribed;
           return {
             content: [{ type: "text" as const, text: `${result.message}\nSubscriptions: ${result.subscriptions.length > 0 ? result.subscriptions.join(", ") : "(none)"}` }],
             details: { mode: "unsubscribe", ok: result.ok, server: params.server, uri: params.uri, subscriptions: result.subscriptions },

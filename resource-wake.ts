@@ -7,8 +7,18 @@ type ResourceUpdatedListener = (serverName: string, uri: string) => void;
 
 const DYNAMIC_TOKEN_PREFIX = "resource-wake:dynamic";
 
+/**
+ * Mirrors MAX_RESOURCE_SUBSCRIPTIONS in server-manager.ts (the listen-filter
+ * cap per server). Declared locally — not imported — so this module adds no
+ * runtime dependency on server-manager.ts; a test asserts the two stay in
+ * sync.
+ */
+export const MAX_SUBSCRIPTIONS_PER_SERVER = 32;
+
 export function dynamicWakeToken(serverName: string, uri: string): string {
-  return `${DYNAMIC_TOKEN_PREFIX}:${serverName}:${uri}`;
+  // JSON encoding: server names and URIs can both contain separators, so a
+  // plain join could collide distinct pairs.
+  return `${DYNAMIC_TOKEN_PREFIX}:${JSON.stringify([serverName, uri])}`;
 }
 
 function makeWakeListener(pi: ExtensionAPI): ResourceUpdatedListener {
@@ -32,16 +42,33 @@ function makeWakeListener(pi: ExtensionAPI): ResourceUpdatedListener {
   };
 }
 
-/** Runtime subscriptions, keyed by manager so they die with the session state. */
-const dynamicSubscriptions = new WeakMap<McpServerManager, Set<string>>();
+/**
+ * Runtime subscriptions, keyed by manager (session state) and then by server,
+ * so they die with the session state and per-server counts are exact.
+ */
+const dynamicSubscriptions = new WeakMap<McpServerManager, Map<string, Set<string>>>();
 
-function dynamicSet(manager: McpServerManager): Set<string> {
-  let set = dynamicSubscriptions.get(manager);
-  if (!set) {
-    set = new Set();
-    dynamicSubscriptions.set(manager, set);
+function serverSet(manager: McpServerManager, serverName: string): Set<string> {
+  let servers = dynamicSubscriptions.get(manager);
+  if (!servers) {
+    servers = new Map();
+    dynamicSubscriptions.set(manager, servers);
   }
-  return set;
+  let uris = servers.get(serverName);
+  if (!uris) {
+    uris = new Set();
+    servers.set(serverName, uris);
+  }
+  return uris;
+}
+
+function flatten(servers: Map<string, Set<string>> | undefined): string[] {
+  if (!servers) return [];
+  const entries: string[] = [];
+  for (const [serverName, uris] of servers) {
+    for (const uri of uris) entries.push(`${serverName} ${uri}`);
+  }
+  return entries;
 }
 
 /**
@@ -53,6 +80,11 @@ function dynamicSet(manager: McpServerManager): Set<string> {
  * level-triggered by design: the message names the URI, the agent reads the
  * resource only if it cares.
  *
+ * The per-server count is capped at the manager's listen-filter limit
+ * (MAX_RESOURCE_SUBSCRIPTIONS): beyond it the filter silently drops the
+ * oldest URI, so subscribing further would report success while never
+ * delivering. The cap fails loudly instead.
+ *
  * Subscriptions are per session state: they die when it is recreated
  * (reload), and nothing subscribes unless the agent asks.
  */
@@ -62,19 +94,25 @@ export function subscribeResource(
   serverName: string,
   uri: string,
 ): { ok: boolean; message: string; subscriptions: string[] } {
-  const set = dynamicSet(manager);
-  const key = `${serverName} ${uri}`;
-  if (set.has(key)) {
-    return { ok: true, message: `Already subscribed to ${uri} on ${serverName}.`, subscriptions: [...set] };
+  const uris = serverSet(manager, serverName);
+  if (uris.has(uri)) {
+    return { ok: true, message: `Already subscribed to ${uri} on ${serverName}.`, subscriptions: flatten(dynamicSubscriptions.get(manager)) };
   }
-  set.add(key);
+  if (uris.size >= MAX_SUBSCRIPTIONS_PER_SERVER) {
+    return {
+      ok: false,
+      message: `Cannot subscribe to ${uri} on ${serverName}: this server already watches ${uris.size} resources and the listen filter drops the oldest beyond ${MAX_SUBSCRIPTIONS_PER_SERVER}. Unsubscribe one first.`,
+      subscriptions: flatten(dynamicSubscriptions.get(manager)),
+    };
+  }
+  uris.add(uri);
   manager.registerResourceUpdatedListener(
     dynamicWakeToken(serverName, uri),
     serverName,
     uri,
     makeWakeListener(pi),
   );
-  return { ok: true, message: `Subscribed to ${uri} on ${serverName}. Updates arrive as agent turns.`, subscriptions: [...set] };
+  return { ok: true, message: `Subscribed to ${uri} on ${serverName}. Updates arrive as agent turns.`, subscriptions: flatten(dynamicSubscriptions.get(manager)) };
 }
 
 /** Remove a runtime subscription; unknown URIs report failure. */
@@ -83,12 +121,19 @@ export function unsubscribeResource(
   serverName: string,
   uri: string,
 ): { ok: boolean; message: string; subscriptions: string[] } {
-  const set = dynamicSubscriptions.get(manager);
-  const key = `${serverName} ${uri}`;
-  if (!set || !set.has(key)) {
-    return { ok: false, message: `No subscription for ${uri} on ${serverName}.`, subscriptions: set ? [...set] : [] };
+  const servers = dynamicSubscriptions.get(manager);
+  const uris = servers?.get(serverName);
+  if (!servers || !uris || !uris.has(uri)) {
+    return { ok: false, message: `No subscription for ${uri} on ${serverName}.`, subscriptions: flatten(servers) };
   }
-  set.delete(key);
+  uris.delete(uri);
+  if (uris.size === 0) servers.delete(serverName);
   manager.removeResourceUpdatedListener(dynamicWakeToken(serverName, uri));
-  return { ok: true, message: `Unsubscribed from ${uri} on ${serverName}.`, subscriptions: [...set] };
+  return { ok: true, message: `Unsubscribed from ${uri} on ${serverName}.`, subscriptions: flatten(servers) };
+}
+
+/** Whether the session holds runtime subscriptions for a server. */
+export function hasServerSubscriptions(manager: McpServerManager, serverName: string): boolean {
+  const uris = dynamicSubscriptions.get(manager)?.get(serverName);
+  return uris !== undefined && uris.size > 0;
 }

@@ -268,7 +268,7 @@ type ResourceListResult = { resources: McpResource[]; failed: boolean };
 const KEEP_ALIVE_REFRESH_TIMEOUT_MS = 5_000;
 const LISTEN_RETRY_DELAY_MS = 5_000;
 const RECENT_RESOURCE_TTL_MS = 10 * 60_000;
-const MAX_RESOURCE_SUBSCRIPTIONS = 32;
+export const MAX_RESOURCE_SUBSCRIPTIONS = 32;
 
 export function isTransientHttpConnectError(error: unknown): boolean {
   let current: unknown = error;

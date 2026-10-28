@@ -73,6 +73,16 @@ export class McpLifecycleManager {
     this.keepAliveServers.set(name, definition);
   }
 
+  /**
+   * Drop a keep-alive hold that was added at runtime (e.g. by a resource
+   * subscription), returning the server to idle-shutdown eligibility.
+   * Callers must not release holds their configuration requested: those are
+   * re-established on every initialization.
+   */
+  releaseKeepAlive(name: string): void {
+    this.keepAliveServers.delete(name);
+  }
+
   registerServer(name: string, definition: ServerDefinition, settings?: { idleTimeout?: number }): void {
     if (isServerDisabled(definition)) return;
     this.allServers.set(name, definition);

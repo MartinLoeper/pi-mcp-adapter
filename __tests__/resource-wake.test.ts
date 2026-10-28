@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { dynamicWakeToken, subscribeResource, unsubscribeResource } from "../resource-wake.ts";
+import { dynamicWakeToken, hasServerSubscriptions, MAX_SUBSCRIPTIONS_PER_SERVER, subscribeResource, unsubscribeResource } from "../resource-wake.ts";
+import { MAX_RESOURCE_SUBSCRIPTIONS } from "../server-manager.ts";
+
+describe("module constants", () => {
+  it("keeps the local per-server cap in sync with the listen-filter cap", () => {
+    expect(MAX_SUBSCRIPTIONS_PER_SERVER).toBe(MAX_RESOURCE_SUBSCRIPTIONS);
+  });
+});
 
 type Listener = (serverName: string, uri: string) => void;
 
@@ -93,5 +100,40 @@ describe("subscribeResource / unsubscribeResource", () => {
     const registration = manager.registrations.get(dynamicWakeToken("my-server", "notes://all"))!;
     expect(() => registration.listener("my-server", "notes://all")).not.toThrow();
     expect(pi.sendMessage).toBeUndefined();
+  });
+
+  it("fails loudly at the listen-filter limit instead of silently dropping the oldest URI", () => {
+    const manager = makeManager();
+    const pi = makePi();
+    for (let i = 0; i < MAX_SUBSCRIPTIONS_PER_SERVER; i++) {
+      const result = subscribeResource(pi, manager as never, "my-server", `notes://items/${i}`);
+      expect(result.ok).toBe(true);
+    }
+    const over = subscribeResource(pi, manager as never, "my-server", "notes://one-too-many");
+    expect(over.ok).toBe(false);
+    expect(over.message).toContain("listen filter drops the oldest");
+    // The over-limit URI was never registered and is not listed.
+    expect(over.subscriptions).not.toContain("my-server notes://one-too-many");
+    // The limit is per server: another server can still subscribe.
+    const other = subscribeResource(pi, manager as never, "other-server", "notes://all");
+    expect(other.ok).toBe(true);
+  });
+
+  it("gives distinct server/URI pairs distinct tokens even with separator characters", () => {
+    expect(dynamicWakeToken("a:notes", "file:///x")).not.toBe(dynamicWakeToken("a", "notes:file:///x"));
+    expect(dynamicWakeToken("a:notes", "file:///x")).not.toBe(dynamicWakeToken("a:notes", "file:///y"));
+  });
+
+  it("reports per-server subscription presence for keep-alive release", () => {
+    const manager = makeManager();
+    const pi = makePi();
+    expect(hasServerSubscriptions(manager as never, "my-server")).toBe(false);
+    subscribeResource(pi, manager as never, "my-server", "notes://all");
+    expect(hasServerSubscriptions(manager as never, "my-server")).toBe(true);
+    unsubscribeResource(manager as never, "my-server", "notes://all");
+    expect(hasServerSubscriptions(manager as never, "my-server")).toBe(false);
+    // Another server's subscription must not keep the flag alive.
+    subscribeResource(pi, manager as never, "other-server", "notes://all");
+    expect(hasServerSubscriptions(manager as never, "my-server")).toBe(false);
   });
 });
