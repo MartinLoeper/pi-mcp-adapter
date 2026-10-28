@@ -7,6 +7,7 @@ import type { McpExtensionState } from "./state.ts";
 import { isServerDisabled, type CachedTool, type DirectToolSpec, type McpAdapterOptions, type McpConfig, type PromptMetadata, type ServerEntry } from "./types.ts";
 import type { McpOAuthRuntime } from "./mcp-auth-flow.ts";
 import type { NestedCallHandOff } from "./proxy-modes.ts";
+import { subscribeResource, unsubscribeResource } from "./resource-wake.ts";
 import type { ExtractField } from "./extraction.ts";
 import { Type } from "typebox";
 import type { TSchema } from "typebox";
@@ -2748,9 +2749,10 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
         offset: optionalNumber({ minimum: 0, description: "Search result offset (default: 0)" }),
         server: Type.Optional(Type.String({ description: "Server name: filters searches, disambiguates calls and describe operations, and optionally names an install" })),
         action: Type.Optional(Type.String({ description: allowScriptToolSave
-          ? "Action: 'install', 'ui-messages', 'auth-start', 'auth-complete', or 'save-script'"
-          : "Action: 'install', 'ui-messages', 'auth-start', or 'auth-complete'" })),
+          ? "Action: 'install', 'ui-messages', 'auth-start', 'auth-complete', 'save-script', 'subscribe', or 'unsubscribe'"
+          : "Action: 'install', 'ui-messages', 'auth-start', 'auth-complete', 'subscribe', or 'unsubscribe'" })),
         url: Type.Optional(Type.String({ description: "MCP endpoint URL for action: 'install'" })),
+        uri: Type.Optional(Type.String({ description: "Resource URI for action: 'subscribe'/'unsubscribe' — push updates for it arrive as agent turns" })),
         target: Type.Optional(Type.String({ description: "Install target: 'global' (default) or 'project'" })),
         cancelTask: Type.Optional(Type.String({ description: "Stop a background MCP task by its <server>/<taskId> key" })),
       }),
@@ -2772,6 +2774,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
         server?: string;
         action?: string;
         url?: string;
+        uri?: string;
         target?: string;
         cancelTask?: string;
       }, signal: AbortSignal | undefined, _onUpdate: AgentToolUpdateCallback<Record<string, unknown>> | undefined, _ctx: ExtensionContext) {
@@ -2855,6 +2858,42 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
 
         if (params.action === "install") {
           return executeInstall(proxyState, params.url, params.server, params.target, _ctx.cwd, _ctx, signal);
+        }
+        if (params.action === "subscribe" || params.action === "unsubscribe") {
+          if (!params.server || !params.uri) {
+            return {
+              content: [{ type: "text" as const, text: `${params.action} requires \`server\` and \`uri\`. Example: mcp({ action: "subscribe", server: "my-server", uri: "notes://all" })` }],
+              details: { mode: params.action, error: "missing_server_or_uri" },
+            };
+          }
+          if (params.action === "subscribe") {
+            // Connect first when needed so pushes can start flowing; the
+            // listener registration itself works connected or not.
+            const core = await loadForRuntime(loadCoreRuntime, proxyGuard);
+            const connected = await core.lazyConnect(proxyState, params.server, signal).catch(() => false);
+            // Keep the connection alive: idle shutdown would otherwise silently
+            // stop pushes after the idle timeout.
+            const definition = proxyState.config.mcpServers[params.server];
+            if (definition) proxyState.lifecycle.markKeepAlive(params.server, definition);
+            // subscriptions/listen needs the modern protocol era; a legacy-era
+            // connection accepts the registration but never delivers.
+            const connection = proxyState.manager.getConnection(params.server);
+            const modernEra = connection?.client?.getProtocolEra?.() === "modern";
+            const result = subscribeResource(pi, proxyState.manager, params.server, params.uri);
+            const warnings = [
+              ...(connected ? [] : ["the server is not connected; updates flow once it connects"]),
+              ...(connected && !modernEra ? ["the connection is not in the modern protocol era; set protocolVersion \"auto\" or \"2026-07-28\" in the server entry to receive pushes"] : []),
+            ];
+            return {
+              content: [{ type: "text" as const, text: `${result.message}${warnings.length > 0 ? `\nWarning: ${warnings.join("; ")}.` : ""}\nSubscriptions: ${result.subscriptions.length > 0 ? result.subscriptions.join(", ") : "(none)"}` }],
+              details: { mode: "subscribe", ok: result.ok, server: params.server, uri: params.uri, connected, modernEra, subscriptions: result.subscriptions },
+            };
+          }
+          const result = unsubscribeResource(proxyState.manager, params.server, params.uri);
+          return {
+            content: [{ type: "text" as const, text: `${result.message}\nSubscriptions: ${result.subscriptions.length > 0 ? result.subscriptions.join(", ") : "(none)"}` }],
+            details: { mode: "unsubscribe", ok: result.ok, server: params.server, uri: params.uri, subscriptions: result.subscriptions },
+          };
         }
         if (params.action === "ui-messages") {
           return proxyModes.executeUiMessages(proxyState);
