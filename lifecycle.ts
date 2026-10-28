@@ -198,8 +198,14 @@ export class McpLifecycleManager {
    * now been used successfully, so its configuration owns a hold from this
    * point — a later subscription release cannot drop it. Mirrors the
    * markKeepAliveAfterConnect call on the lazyConnect paths.
+   *
+   * Fenced: the hold may have been released while the connection was in
+   * flight; re-adding it would restore background retries after an
+   * unsubscribe and would defeat the staleness check the metadata
+   * publication runs next.
    */
   private markConfigHoldAfterConnect(name: string, definition: ServerDefinition): void {
+    if (this.keepAliveServers.get(name) !== definition) return;
     if ((definition.lifecycle ?? "lazy") === "lazy-keep-alive") {
       this.markKeepAlive(name, definition);
     }

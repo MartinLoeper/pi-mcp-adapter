@@ -153,6 +153,27 @@ describe("lazy-keep-alive lifecycle", () => {
     expect(fake.connectCalls).toContain("srv");
   });
 
+  it("a hold released while a reconnect is in flight is not restored by its success", async () => {
+    // The subscription marks the never-connected server; its unsubscribe
+    // (last URI removed) lands while the health-check connect is in flight.
+    const def = makeDefinition("lazy-keep-alive");
+    lifecycle.registerServer("srv", def, { idleTimeout: 0 });
+    lifecycle.markKeepAlive("srv", def, "resource-subscription");
+    fake.setConnection("srv", null);
+    const originalConnect = fake.connect.bind(fake);
+    const connectSpy = vi.spyOn(fake, "connect").mockImplementation(async (name: string) => {
+      lifecycle.releaseKeepAlive("srv", "resource-subscription");
+      return originalConnect(name);
+    });
+
+    await (lifecycle as never as { checkConnections: () => Promise<void> }).checkConnections();
+    connectSpy.mockRestore();
+
+    expect(fake.connectCalls).toContain("srv");
+    // The successful reconnect must not resurrect the released hold.
+    expect(lifecycle.isKeepAlive("srv")).toBe(false);
+  });
+
   it("a lazy-keep-alive server recovered by a health check gains the config-owned hold", async () => {
     // A subscription marked this never-connected server keep-alive (its
     // lazyConnect failed, so markKeepAliveAfterConnect never ran).
