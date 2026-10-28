@@ -29,6 +29,7 @@ import {
 import { McpServerManager, isTransientHttpConnectError, type ServerConnection } from "./server-manager.ts";
 import { buildToolMetadata, ownTools, totalToolCount, unavailableAppNotes } from "./tool-metadata.ts";
 import { resourceNameToToolName } from "./resource-tools.ts";
+import { registerResourceWakeListeners } from "./resource-wake.ts";
 import { UiResourceHandler } from "./ui-resource-handler.ts";
 import { formatMcpFooterStatus, formatMcpStatus, openUrl, parallelLimit, providerSignInMessage, sanitizeTerminalText } from "./utils.ts";
 import { logger } from "./logger.ts";
@@ -177,6 +178,9 @@ export async function initializeMcp(
   manager.setDefaultRequestTimeoutMs(config.settings?.requestTimeoutMs);
   manager.setTraceConfig?.(config.settings?.trace);
   manager.setAuthStorageOptions(authStorageOptions);
+  // Config-driven resource subscriptions: every `subscribe` URI gets a push
+  // listener that wakes the agent when the server reports it changed.
+  registerResourceWakeListeners(pi, manager, config.mcpServers);
   // Pi before 0.99.2 has no getApiKeyForProvider; auth.provider servers then fail to connect with a notice.
   if (typeof modelRegistry?.getApiKeyForProvider === "function") {
     manager.setProviderToken(provider => modelRegistry.getApiKeyForProvider(provider));

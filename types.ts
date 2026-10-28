@@ -477,6 +477,15 @@ export interface ServerEntry {
   requestTimeoutMs?: number; // milliseconds, overrides global request timeout when > 0
   // Resource handling
   exposeResources?: boolean;
+  /**
+   * Resource URIs to watch for push updates. Each URI is added to the
+   * server's subscriptions/listen filter; every ResourceUpdated
+   * notification for a subscribed URI is delivered to the agent as a
+   * custom message that triggers a new turn (level-triggered: the message
+   * names the URI, the agent reads the resource if it cares). Requires a
+   * server that speaks subscriptions/listen (MCP 2026-07-28).
+   */
+  subscribe?: string[];
   // Direct tool registration
   directTools?: boolean | string[] | "search";
   // Override settings.toolPrefix for this server.

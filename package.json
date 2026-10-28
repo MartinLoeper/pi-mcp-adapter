@@ -147,6 +147,7 @@
     "agent-plugin-loader.ts",
     "agent-plugin-provenance.ts",
     "resource-tools.ts",
+    "resource-wake.ts",
     "lifecycle.ts",
     "mcp-status.ts",
     "metadata-cache.ts",
