@@ -4,10 +4,50 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { McpServerManager } from "./server-manager.ts";
 import type { ServerEntry } from "./types.ts";
 
+type ResourceUpdatedListener = (serverName: string, uri: string) => void;
+
 const WAKE_TOKEN_PREFIX = "resource-wake";
+const DYNAMIC_TOKEN_PREFIX = "resource-wake:dynamic";
 
 export function resourceWakeToken(serverName: string, uri: string): string {
   return `${WAKE_TOKEN_PREFIX}:${serverName}:${uri}`;
+}
+
+export function dynamicWakeToken(serverName: string, uri: string): string {
+  return `${DYNAMIC_TOKEN_PREFIX}:${serverName}:${uri}`;
+}
+
+function makeWakeListener(pi: ExtensionAPI): ResourceUpdatedListener {
+  const sendMessage = typeof pi.sendMessage === "function"
+    ? pi.sendMessage.bind(pi)
+    : undefined;
+  return (updatedServer, updatedUri) => {
+    if (!sendMessage) return;
+    try {
+      sendMessage(
+        {
+          customType: "mcp-resource-updated",
+          content: `MCP resource updated: ${updatedUri} (server ${updatedServer}).`,
+          display: true,
+        },
+        { triggerTurn: true, deliverAs: "followUp" },
+      );
+    } catch (error) {
+      console.error(`MCP: failed to deliver resource update for ${updatedUri}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+}
+
+/** Dynamic subscriptions, keyed by manager so they die with the session state. */
+const dynamicSubscriptions = new WeakMap<McpServerManager, Set<string>>();
+
+function dynamicSet(manager: McpServerManager): Set<string> {
+  let set = dynamicSubscriptions.get(manager);
+  if (!set) {
+    set = new Set();
+    dynamicSubscriptions.set(manager, set);
+  }
+  return set;
 }
 
 /**
@@ -49,9 +89,7 @@ export function registerResourceWakeListeners(
   manager: McpServerManager,
   servers: Record<string, ServerEntry>,
 ): void {
-  const sendMessage = typeof pi.sendMessage === "function"
-    ? pi.sendMessage.bind(pi)
-    : undefined;
+  const wake = makeWakeListener(pi);
   for (const [serverName, entry] of Object.entries(servers)) {
     if (!entry.subscribe || entry.subscribe.length === 0) continue;
     if (entry.protocolVersion === undefined || entry.protocolVersion === "legacy") {
@@ -69,22 +107,52 @@ export function registerResourceWakeListeners(
         resourceWakeToken(serverName, uri),
         serverName,
         uri,
-        (updatedServer, updatedUri) => {
-          if (!sendMessage) return;
-          try {
-            sendMessage(
-              {
-                customType: "mcp-resource-updated",
-                content: `MCP resource updated: ${updatedUri} (server ${updatedServer}).`,
-                display: true,
-              },
-              { triggerTurn: true, deliverAs: "followUp" },
-            );
-          } catch (error) {
-            console.error(`MCP: failed to deliver resource update for ${updatedUri}: ${error instanceof Error ? error.message : String(error)}`);
-          }
-        },
+        wake,
       );
     }
   }
+}
+
+/**
+ * Subscribe at runtime to push updates for one resource URI. Idempotent;
+ * re-subscribing an already-watched URI is a no-op. The manager folds the
+ * URI into its listen filter immediately (re-establishing the stream when
+ * connected). Dynamic subscriptions are lost when the session state is
+ * recreated (reload); static config `subscribe` entries are re-registered.
+ */
+export function subscribeResource(
+  pi: ExtensionAPI,
+  manager: McpServerManager,
+  serverName: string,
+  uri: string,
+): { ok: boolean; message: string; subscriptions: string[] } {
+  const set = dynamicSet(manager);
+  const key = `${serverName} ${uri}`;
+  if (set.has(key)) {
+    return { ok: true, message: `Already subscribed to ${uri} on ${serverName}.`, subscriptions: [...set] };
+  }
+  set.add(key);
+  manager.registerResourceUpdatedListener(
+    dynamicWakeToken(serverName, uri),
+    serverName,
+    uri,
+    makeWakeListener(pi),
+  );
+  return { ok: true, message: `Subscribed to ${uri} on ${serverName}. Updates arrive as agent turns.`, subscriptions: [...set] };
+}
+
+/** Remove a runtime subscription. Static config `subscribe` entries are not affected. */
+export function unsubscribeResource(
+  manager: McpServerManager,
+  serverName: string,
+  uri: string,
+): { ok: boolean; message: string; subscriptions: string[] } {
+  const set = dynamicSubscriptions.get(manager);
+  const key = `${serverName} ${uri}`;
+  if (!set || !set.has(key)) {
+    return { ok: false, message: `No dynamic subscription for ${uri} on ${serverName}. (Static config subscribe entries are not removable at runtime.)`, subscriptions: set ? [...set] : [] };
+  }
+  set.delete(key);
+  manager.removeResourceUpdatedListener(dynamicWakeToken(serverName, uri));
+  return { ok: true, message: `Unsubscribed from ${uri} on ${serverName}.`, subscriptions: [...set] };
 }

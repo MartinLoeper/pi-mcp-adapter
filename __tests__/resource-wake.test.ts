@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { normalizeSubscribeLifecycle, registerResourceWakeListeners, resourceWakeToken } from "../resource-wake.ts";
+import { dynamicWakeToken, normalizeSubscribeLifecycle, registerResourceWakeListeners, resourceWakeToken, subscribeResource, unsubscribeResource } from "../resource-wake.ts";
 import type { ServerEntry } from "../types.ts";
 
 type Listener = (serverName: string, uri: string) => void;
@@ -24,6 +24,65 @@ function makePi(withSendMessage = true) {
       : undefined,
   } as unknown as Parameters<typeof registerResourceWakeListeners>[0];
 }
+
+describe("dynamic subscribe/unsubscribe", () => {
+  it("subscribes, tracks, and wakes on updates", () => {
+    const manager = makeManager();
+    const pi = makePi();
+    const result = subscribeResource(pi, manager as never, "magellan-ci", "magellan://pipelinerun/ns/run-1");
+    expect(result.ok).toBe(true);
+    expect(result.subscriptions).toEqual(["magellan-ci magellan://pipelinerun/ns/run-1"]);
+
+    const registration = manager.registrations.get(dynamicWakeToken("magellan-ci", "magellan://pipelinerun/ns/run-1"))!;
+    registration.listener("magellan-ci", "magellan://pipelinerun/ns/run-1");
+    expect(pi.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ content: "MCP resource updated: magellan://pipelinerun/ns/run-1 (server magellan-ci)." }),
+      { triggerTurn: true, deliverAs: "followUp" },
+    );
+  });
+
+  it("re-subscribing is idempotent (no duplicate wake)", () => {
+    const manager = makeManager();
+    const pi = makePi();
+    subscribeResource(pi, manager as never, "s", "a://b");
+    const again = subscribeResource(pi, manager as never, "s", "a://b");
+    expect(again.ok).toBe(true);
+    expect(again.message).toContain("Already subscribed");
+    expect(manager.registrations.size).toBe(1);
+  });
+
+  it("unsubscribes only dynamic registrations", () => {
+    const manager = makeManager();
+    const pi = makePi();
+    // A static (config) subscription plus a dynamic one.
+    registerResourceWakeListeners(pi, manager as never, { "s": { url: "http://x", subscribe: ["static://uri"] } });
+    subscribeResource(pi, manager as never, "s", "dyn://uri");
+    expect(manager.registrations.size).toBe(2);
+
+    const result = unsubscribeResource(manager as never, "s", "dyn://uri");
+    expect(result.ok).toBe(true);
+    expect(manager.registrations.has(dynamicWakeToken("s", "dyn://uri"))).toBe(false);
+    expect(manager.registrations.has(resourceWakeToken("s", "static://uri"))).toBe(true);
+  });
+
+  it("unsubscribing an unknown URI reports failure without touching others", () => {
+    const manager = makeManager();
+    const result = unsubscribeResource(manager as never, "s", "never://subscribed");
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("No dynamic subscription");
+  });
+
+  it("dynamic subscriptions are tracked per manager instance", () => {
+    const managerA = makeManager();
+    const managerB = makeManager();
+    const pi = makePi();
+    subscribeResource(pi, managerA as never, "s", "a://b");
+    const onB = subscribeResource(pi, managerB as never, "s", "a://b");
+    expect(onB.message).not.toContain("Already subscribed");
+    expect(managerA.registrations.size).toBe(1);
+    expect(managerB.registrations.size).toBe(1);
+  });
+});
 
 describe("normalizeSubscribeLifecycle", () => {
   it("defaults subscribe servers to keep-alive and leaves others untouched", () => {
