@@ -2,6 +2,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { McpServerManager } from "./server-manager.ts";
+import type { ServerEntry } from "./types.ts";
 
 type ResourceUpdatedListener = (serverName: string, uri: string) => void;
 
@@ -136,4 +137,28 @@ export function unsubscribeResource(
 export function hasServerSubscriptions(manager: McpServerManager, serverName: string): boolean {
   const uris = dynamicSubscriptions.get(manager)?.get(serverName);
   return uris !== undefined && uris.size > 0;
+}
+
+/**
+ * Whether a subscription on a server with this lifecycle mode must add its
+ * own keep-alive hold. Only "keep-alive" holds unconditionally from
+ * configuration (marked at initialization). "eager" never enters the
+ * keep-alive set, and "lazy-keep-alive" enters it only after a successful
+ * connect — a server in either mode that is disconnected when the agent
+ * subscribes would otherwise report success and never receive updates,
+ * because nothing retries the connection.
+ */
+export function subscriptionNeedsKeepAliveHold(lifecycle: ServerEntry["lifecycle"] | undefined): boolean {
+  return lifecycle !== "keep-alive";
+}
+
+/**
+ * Whether a subscription-added keep-alive hold may be released once the
+ * last URI is unsubscribed. "keep-alive" holds from configuration and
+ * "lazy-keep-alive" holds from any successful connect; dropping either
+ * would fight configuration. Undefined (lazy default) and "eager" holds
+ * exist only while a subscription needs them.
+ */
+export function subscriptionMayReleaseKeepAliveHold(lifecycle: ServerEntry["lifecycle"] | undefined): boolean {
+  return lifecycle === undefined || lifecycle === "lazy" || lifecycle === "eager";
 }

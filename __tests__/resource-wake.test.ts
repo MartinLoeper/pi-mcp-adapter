@@ -1,6 +1,40 @@
 import { describe, expect, it, vi } from "vitest";
-import { dynamicWakeToken, hasServerSubscriptions, MAX_SUBSCRIPTIONS_PER_SERVER, subscribeResource, unsubscribeResource } from "../resource-wake.ts";
+import { dynamicWakeToken, hasServerSubscriptions, MAX_SUBSCRIPTIONS_PER_SERVER, subscriptionMayReleaseKeepAliveHold, subscriptionNeedsKeepAliveHold, subscribeResource, unsubscribeResource } from "../resource-wake.ts";
 import { MAX_RESOURCE_SUBSCRIPTIONS } from "../server-manager.ts";
+import type { ServerEntry } from "../types.ts";
+
+describe("keep-alive hold rules", () => {
+  it("needs a hold for every mode except keep-alive", () => {
+    // Only "keep-alive" holds unconditionally from configuration. Eager
+    // never enters the keep-alive set; lazy-keep-alive only after a connect.
+    expect(subscriptionNeedsKeepAliveHold("keep-alive")).toBe(false);
+    expect(subscriptionNeedsKeepAliveHold("eager")).toBe(true);
+    expect(subscriptionNeedsKeepAliveHold("lazy-keep-alive")).toBe(true);
+    expect(subscriptionNeedsKeepAliveHold("lazy")).toBe(true);
+    expect(subscriptionNeedsKeepAliveHold(undefined)).toBe(true);
+  });
+
+  it("may release only holds the subscription alone created", () => {
+    // keep-alive holds from init and lazy-keep-alive holds from connects
+    // must survive; lazy/eager holds exist only for the subscription.
+    expect(subscriptionMayReleaseKeepAliveHold("keep-alive")).toBe(false);
+    expect(subscriptionMayReleaseKeepAliveHold("lazy-keep-alive")).toBe(false);
+    expect(subscriptionMayReleaseKeepAliveHold("eager")).toBe(true);
+    expect(subscriptionMayReleaseKeepAliveHold("lazy")).toBe(true);
+    expect(subscriptionMayReleaseKeepAliveHold(undefined)).toBe(true);
+  });
+
+  it("accepts real server entries of each shape", () => {
+    const entries: Record<string, ServerEntry> = {
+      configured: { url: "http://x", lifecycle: "lazy-keep-alive" },
+      lazyDefault: { url: "http://y" },
+    };
+    expect(subscriptionNeedsKeepAliveHold(entries["configured"].lifecycle)).toBe(true);
+    expect(subscriptionMayReleaseKeepAliveHold(entries["configured"].lifecycle)).toBe(false);
+    expect(subscriptionNeedsKeepAliveHold(entries["lazyDefault"].lifecycle)).toBe(true);
+    expect(subscriptionMayReleaseKeepAliveHold(entries["lazyDefault"].lifecycle)).toBe(true);
+  });
+});
 
 describe("module constants", () => {
   it("keeps the local per-server cap in sync with the listen-filter cap", () => {
